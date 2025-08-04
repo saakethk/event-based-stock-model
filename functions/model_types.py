@@ -16,9 +16,9 @@ class EarningsObject:
         self.rev = float(rev) if rev is not None else 0
         match time:
             case "bmo": # Before market open
-                self.time = timedelta(hours=10)
-            case "amc": # After market open
-                self.time = timedelta(hours=34)
+                self.time = timedelta(hours=9, minutes=30)
+            case "amc": # After market close
+                self.time = timedelta(hours=33, minutes=30)
             case "dmh": # During market hours
                 self.time = timedelta(hours=14)
             case _:
@@ -39,8 +39,12 @@ class IpoObject:
         self.symbol = symbol
         self.name = name
         self.date = datetime.strptime(date, "%Y-%m-%d")
-        self.upper_price, self.lower_price = expected_price.split("-")
-        self.expected_price = (float(self.upper_price) + float(self.lower_price)) /2
+        self.price = expected_price.split("-")
+        if len(self.price) < 2:
+            self.expected_price = float(self.price[0])
+        else:
+            self.upper_price, self.lower_price = self.price
+            self.expected_price = (float(self.upper_price) + float(self.lower_price)) /2
         self.buy_time = self.date + timedelta(hours=14)
         
     def __str__(self):
@@ -95,7 +99,7 @@ class Order:
                 "apiKey": os.getenv("NEWS_EXTRA_API_KEY"),
                 "sortBy": "relevancy",
                 "language": "en",
-                "from": model_helper.get_timestamp(with_time=False, delta=120),
+                "from": model_helper.get_timestamp(with_time=False, delta=180),
                 "pageSize": 10
             }
         )
@@ -122,20 +126,22 @@ class Order:
                 self.defense = res["defense"]
                 match self.stance:
                     case "bearish":
-                        self.price_upper = self.price * 1.05
-                        self.price_lower = self.price * .95
+                        self.price_upper = 1.05
+                        self.price_lower = .95
                     case "bullish":
-                        self.price_upper = self.price * 1.1
-                        self.price_lower = self.price * .9
+                        self.price_upper = 1.1
+                        self.price_lower = .9
                     case _:
-                        self.price_upper = self.price * 1.01
-                        self.price_lower = self.price * 0.99
+                        self.price_upper = 1.02
+                        self.price_lower = 0.98
                 self.status = "order_created"
             except Exception as error:
                 model_helper.log(f"AI ANALYSIS FAILED: {error}")
+                self.status = "canceled_ai_analy_fail"
                 self.elgible = False
         else:
             model_helper.log(f"INSUFFICIENT NUMBER OF ARTICLES TO ANALYZE")
+            self.status = "canceled_insuff_articles"
             self.elgible = False
     
     def updateDatabase(self):
@@ -148,19 +154,21 @@ class Order:
 
     def scheduleTask(self):
         if self.elgible:
-            body = {
-                "id": self.id,
-                "symbol": self.symbol,
-                "amount": 100,
-                "upper": self.price_upper,
-                "lower": self.price_lower,
-                "lower_safety": self.price_lower * 0.95
-            }
-            task_queue = functions.task_queue("createstockorder")
-            task_options = functions.TaskOptions(schedule_time=self.execute_time,
-                                                dispatch_deadline_seconds=60*5,
-                                                uri="https://us-central1-nous-486de.cloudfunctions.net/createstockorder")
-            task_queue.enqueue(body, task_options)
+            model_helper.queue_task(
+                function_id="createstockorder",
+                data={
+                    "data": {
+                        "id": self.id,
+                        "symbol": self.symbol,
+                        "amount": 1,
+                        "current_price": self.price,
+                        "upper": self.price_upper,
+                        "lower": self.price_lower,
+                        "lower_safety": self.price_lower - 0.01,
+                    }
+                },
+                execute_time=self.execute_time
+            )
             self.status = "scheduled"
 
     def getDict(self):
@@ -169,8 +177,8 @@ class Order:
             "symbol": self.symbol,
             "name": self.name,
             "type": self.type,
-            "price": {
-                "current": self.price,
+            "pred_spread": {
+                "curr_price": self.price,
                 "upper": self.price_upper,
                 "lower": self.price_lower
             },

@@ -7,7 +7,11 @@ from google import genai
 from pprint import pprint
 from firebase_admin import initialize_app, firestore, credentials
 from google.cloud.firestore_v1.base_query import FieldFilter
+import json
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
 import os
+from google.cloud import tasks_v2
 
 # LOAD ENV VARS
 DEV = False
@@ -43,8 +47,8 @@ def get_data_finnhub(url: str, params: dict) -> tuple[bool, dict | str]:
 def get_data_alpaca(url: str, market=False) -> tuple[bool, dict | str]:
     headers = {
         "accept": "application/json",
-        "APCA-API-KEY-ID": os.getenv("MARKET_API_KEY"),
-        "APCA-API-SECRET-KEY": os.getenv("MARKET_API_SECRET")
+        "APCA-API-KEY-ID": os.getenv("MARKET_API_KEY_DEV"),
+        "APCA-API-SECRET-KEY": os.getenv("MARKET_API_SECRET_DEV")
     }
     if market:
         response = requests.get(f"https://data.alpaca.markets/{url}", headers=headers)
@@ -113,3 +117,39 @@ def get_database_collection(collection: str, field: str, value: str, key: str):
     for doc in docs:
         documents.append(doc.to_dict()[key])
     return documents
+
+# GETS FIREBASE FUNCTION URL
+def get_function_url(name: str, location: str = "us-central1") -> str:
+    credentials, project_id = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    authed_session = AuthorizedSession(credentials)
+    url = ("https://cloudfunctions.googleapis.com/v2beta/" +
+           f"projects/{project_id}/locations/{location}/functions/{name}")
+    response = authed_session.get(url)
+    data = response.json()
+    function_url = data["serviceConfig"]["uri"]
+    return function_url
+
+# QUEUES TASK IN FIREBASE FUNCTIONS
+def queue_task(function_id: str, data: dict, execute_time: datetime):
+    client = tasks_v2.CloudTasksClient()
+    project = "nous-486de"
+    queue = function_id
+    location = "us-central1"
+    service_account_email = "firebase-adminsdk-fbsvc@nous-486de.iam.gserviceaccount.com"
+    parent = client.queue_path(project, location, queue)
+    task = tasks_v2.Task(http_request={
+            "http_method": tasks_v2.HttpMethod.POST,
+            "url": get_function_url(function_id),
+            "headers": {
+                "Content-type": "application/json"
+            },
+            "body": json.dumps(data).encode(),
+            "oidc_token": {
+                "service_account_email": service_account_email
+            }
+        },
+        schedule_time=execute_time
+    )
+    response = client.create_task(parent=parent, task=task)
+    return response.name
