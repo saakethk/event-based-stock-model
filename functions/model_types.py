@@ -68,6 +68,7 @@ class Order:
         self.execute_time = self.object.buy_time - timedelta(minutes=5)
         self.execute_time = self.execute_time + timedelta(hours=4) # timezone adjustment for central server time
         self.elgible = True if self.price != None else False
+        self.tweet_id = "failed"
 
     def getCompanyName(self):
         success, company_profile = model_helper.get_data_finnhub(
@@ -158,6 +159,7 @@ class Order:
                 function_id="createstockorder",
                 data={
                     "data": {
+                        "key": os.getenv("NOUS_API_KEY"),
                         "id": self.id,
                         "symbol": self.symbol,
                         "amount": 1,
@@ -170,6 +172,25 @@ class Order:
                 execute_time=self.execute_time
             )
             self.status = "scheduled"
+
+    def postTweet(self):
+        if self.elgible:
+            tweet_content = model_helper.ask_llm(
+                prompt=f"Create a concise, engaging tweet that is under 240 characters and only uses the provided information. Information: {self.overview} {self.defense}"
+            )
+            if "none" in tweet_content.lower():
+                self.tweet_id = "failed"
+            else:
+                success, tweet_id = model_helper.create_tweet(
+                    payload={
+                        "text": f"{tweet_content} Should I buy {self.symbol} stock?",
+                        "poll": {
+                            "options": ["Yes.", "Absolutely not.", "Maybe."],
+                            "duration_minutes": 60 * 24 * 7
+                        }
+                    }
+                )
+                self.tweet_id = tweet_id if success else "failed"
 
     def getDict(self):
         return {
@@ -190,6 +211,7 @@ class Order:
                 "defense": self.defense,
                 "sources": self.sources
             },
+            "tweet_discovery_id": self.tweet_id,
             "status": self.status
         }
     

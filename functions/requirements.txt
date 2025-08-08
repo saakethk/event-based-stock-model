@@ -2,3 +2,15 @@ firebase_functions~=0.1.0
 google-genai
 dotenv
 google-cloud-tasks
+requests_oauthlib
+moviepy
+firebase_admin
+google-genai
+google-cloud-texttospeech
+audioop-lts
+requests
+google-api-python-client
+google-auth-oauthlib 
+google-auth-httplib2
+google-api-python-client
+oauth2client

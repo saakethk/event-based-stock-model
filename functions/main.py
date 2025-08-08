@@ -3,10 +3,10 @@
 import model_helper
 import model_types
 import os
-from firebase_functions import https_fn, scheduler_fn, tasks_fn
+from firebase_functions import https_fn, scheduler_fn
 from firebase_admin import firestore
-from firebase_functions.options import RetryConfig, RateLimits
 import time
+from datetime import datetime
 
 # GET FUTURE EARNINGS DATES
 def get_earnings() -> list:
@@ -85,17 +85,18 @@ def get_future_ipos() -> list:
     return ipos
 
 # ANALYZE AND CHOOSE WHICH ORDERS TO PLACE
-def formulate_orders():
+def formulate_orders() -> list:
 
     # Sorts response
     def sort_orders(order: model_types.Order):
         return order.execute_time, order.price
 
     # Gets data
-    active_orders = model_helper.get_database_collection(
+    ids, active_orders = model_helper.get_database_collection(
         collection="actions",
         field="status",
-        value="executed",
+        operator="==",
+        value="scheduled",
         key="symbol"
     )
     ipos = get_future_ipos()
@@ -205,6 +206,83 @@ def createstockorder(req: https_fn.Request) -> https_fn.Response:
     else:
         model_helper.log(f"INVALID API KEY")
         return https_fn.Response(f"INVALID API KEY", status=400)
+
+# CHECK ORDER STATUS
+@scheduler_fn.on_schedule(schedule="0 * * * *")
+def check_orders(req: https_fn.Request) -> https_fn.Response:
+
+    # Gets executed orders
+    ids, executed_orders = model_helper.get_database_collection(
+        collection="actions",
+        field="status",
+        operator="==",
+        value="executed",
+        key="associated_action"
+    )
+
+    for id, order in zip(ids, executed_orders):
+        
+        # Gets order info
+        alpaca_order_id = order['alpaca_order_id']
+        success, order_info = model_helper.get_data_alpaca(
+            url=f"v2/orders/{alpaca_order_id}?nested=true"
+        )
+        if success:
+
+            # Gets legs of order
+            buy_fill_price, buy_quantity = float(order_info["filled_avg_price"]), float(order_info["filled_qty"])
+            symbol = order_info["symbol"]
+            legs = order_info["legs"]
+            buy_time = datetime.strptime(
+                order_info["created_at"][:-4], 
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )
+            for order_leg in legs:
+                if order_leg["status"] == "filled":
+
+                    # Calculates profit or loss on trade
+                    sell_fill_price, sell_quantity = float(order_leg["filled_avg_price"]), float(order_leg["filled_qty"])
+                    pl_abs = (sell_fill_price * sell_quantity) - (buy_fill_price * buy_quantity)
+                    pl_rel = (pl_abs / (buy_fill_price * buy_quantity)) * 100
+                    sell_time = datetime.strptime(
+                        order_leg["updated_at"][:-4], 
+                        "%Y-%m-%dT%H:%M:%S.%f"
+                    )
+
+                    # Posts tweet
+                    if pl_rel > 0:
+                        tweet_content = f"I just sold the {symbol} stock I bought on {buy_time} for a percent gain of {round(pl_rel, 2)}%. Do you guys approve of this?"
+                    else:
+                        tweet_content = f"I just sold the {symbol} stock I bought on {buy_time} for a percent loss of {round(pl_rel, 2)}%. Do you guys approve of this?"
+                    success, tweet_id = model_helper.create_tweet(
+                        payload={
+                            "text": tweet_content,
+                            "poll": {
+                                "options": ["Yeah, Absolutely.", "You should've held.", "I'm not sure."],
+                                "duration_minutes": 60 * 24 * 7
+                            }
+                        }
+                    )
+
+                    # Updates database
+                    order["execution_info"] = {
+                        "buy_fill_price": buy_fill_price,
+                        "buy_quantity": buy_quantity,
+                        "sell_fill_price": sell_fill_price,
+                        "sell_quantity": sell_quantity,
+                        "pl_abs": pl_abs,
+                        "pl_rel": pl_rel,
+                        "timestamp": sell_time
+                    }
+                    model_helper.set_database(
+                        collection="actions",
+                        document=id,
+                        data={
+                            "status": "complete",
+                            "associated_action": order,
+                            "associated_tweet_followup_id": tweet_id if success else "failed"
+                        }
+                    )
     
 # CREATE TASK QUEUE ORDER AND FIRESTORE ENTRY
 @scheduler_fn.on_schedule(schedule="0 4 * * *", timeout_sec=300)
@@ -225,6 +303,7 @@ def schedule_orders(req: https_fn.Request) -> https_fn.Response:
                 order.updateDatabase()
                 if order.elgible:
                     order.scheduleTask()
+                    order.postTweet()
                     if order.status == "scheduled":
                         orders_exec += 1
                 time.sleep(1)
@@ -235,3 +314,5 @@ def schedule_orders(req: https_fn.Request) -> https_fn.Response:
                 continue
         else:
             break
+
+# check_orders()

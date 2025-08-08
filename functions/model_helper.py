@@ -12,9 +12,10 @@ import google.auth
 from google.auth.transport.requests import AuthorizedSession
 import os
 from google.cloud import tasks_v2
+from requests_oauthlib import OAuth1Session
 
 # LOAD ENV VARS
-DEV = False
+DEV = True
 if DEV:
     cred = credentials.Certificate("model/firebase.json")
     initialize_app(cred)
@@ -54,6 +55,7 @@ def get_data_alpaca(url: str, market=False) -> tuple[bool, dict | str]:
         response = requests.get(f"https://data.alpaca.markets/{url}", headers=headers)
     else:
         response = requests.get(f"https://paper-api.alpaca.markets/{url}", headers=headers)
+    print(response.json())
     response_object = response.json()
     if "message" in response_object:
         return False, response_object["message"]
@@ -96,27 +98,29 @@ def ask_llm(prompt: str):
 # INTERFACE WITH FIRESTORE (Modify)
 def set_database(collection: str, document: str, data: dict):
     firestore_client: firestore.client = firestore.client()
-    firestore_client.collection(collection).document(document).set(data)
+    firestore_client.collection(collection).document(document).set(data, merge=True)
     return True
 
 # INTERFACE WITH FIRESTORE (Retrieve)
 def get_database(collection: str, document: str):
     firestore_client: firestore.Client = firestore.client()
-    ipo_ref = firestore_client.collection(collection).document(document)
-    return ipo_ref.get().to_dict()
+    ref = firestore_client.collection(collection).document(document)
+    return ref.get().to_dict()
 
 # INTERFACE WITH FIRESTORE (Retrieve group)
-def get_database_collection(collection: str, field: str, value: str, key: str):
+def get_database_collection(collection: str, field: str, value: str, operator: str, key: str):
     firestore_client: firestore.client = firestore.client()
     docs = (
         firestore_client.collection(collection)
-        .where(filter=FieldFilter(field, "!=", value))
+        .where(filter=FieldFilter(field, operator, value))
         .stream()
     )
+    ids = []
     documents = []
     for doc in docs:
+        ids.append(doc.id)
         documents.append(doc.to_dict()[key])
-    return documents
+    return ids, documents
 
 # GETS FIREBASE FUNCTION URL
 def get_function_url(name: str, location: str = "us-central1") -> str:
@@ -153,3 +157,26 @@ def queue_task(function_id: str, data: dict, execute_time: datetime):
     )
     response = client.create_task(parent=parent, task=task)
     return response.name
+
+# POSTS TWEET VIA TWITTER API V2
+def create_tweet(payload: dict):
+
+    # Make the request
+    oauth = OAuth1Session(
+        os.getenv("TWITTER_API_KEY"),
+        client_secret=os.getenv("TWITTER_API_SECRET"),
+        resource_owner_key=os.getenv("TWITTER_ACCESS_TOKEN"),
+        resource_owner_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
+    )
+
+    # Making the request
+    response = oauth.post(
+        "https://api.twitter.com/2/tweets",
+        json=payload,
+    )
+    if response.status_code != 201:
+        log(f"TWEET POST FAILED: {response.status_code} {response.text}")
+        return False, response.text
+
+    # Returns tweet id
+    return True, response.json()["data"]["id"]
