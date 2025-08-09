@@ -2,6 +2,8 @@
 # DEPENDENCIES
 import model_helper
 import model_types
+import model_video
+import model_social
 import os
 from firebase_functions import https_fn, scheduler_fn
 from firebase_admin import firestore
@@ -316,3 +318,58 @@ def schedule_orders(req: https_fn.Request) -> https_fn.Response:
             break
 
 # check_orders()
+
+# CREATES VIDEO AND UPLOADS TO YOUTUBE
+@https_fn.on_request()
+def create_video(req: https_fn.Request) -> https_fn.Response:
+    try:
+
+        # Gets request data
+        data = req.get_json()
+        api_key = data["data"]["key"]
+        if api_key == os.getenv("NOUS_API_KEY"):
+            title = data["data"]["title"]
+            description = data["data"]["description"]
+            tags = data["data"]["tags"].split(",")
+            category_id = data["data"]["category_id"]
+            status = data["data"]["status"]
+            text = data["data"]["text"]
+            doc_id = data["data"]["id"]
+            vid_type = data["data"]["type"]
+
+            # Creates video
+            filename = model_video.create_video_beta(
+                text=text
+            )
+            success, youtube_id = model_social.upload_video(
+                filename=filename,
+                type=vid_type,
+                title=title,
+                description=description,
+                tags=tags,
+                category_id=category_id,
+                privacy_status=status
+            )
+
+            # Updates database
+            if success:
+                match vid_type:     
+                    case "fred_likes_stonks":
+                        model_helper.set_database(
+                            collection="actions",
+                            document=doc_id,
+                            data={
+                                "youtube_upload_id": youtube_id
+                            }
+                        )
+                    case _:
+                        model_helper.log("DEFAULT")
+            else:
+                return https_fn.Response(f"VIDEO UPLOAD FAILED", status=400)
+            return https_fn.Response("VIDEO CREATED SUCCESSFULLY", status=200)
+        
+    except Exception as error:
+
+        # Prints error log
+        model_helper.log(f"ERROR WITH VIDEO CREATION: {error}")
+        return https_fn.Response(f"ERROR WITH VIDEO CREATION: {error}", status=400)

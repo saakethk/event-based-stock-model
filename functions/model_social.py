@@ -37,14 +37,14 @@ class YouTubeClient():
         )
     
     # Gets channel token info from database
-    def getChannelToken(self):
+    def getChannelToken(self, name: str):
         return model_helper.get_database(
             collection="creds",
-            document="youtube_token"
+            document=name
         )
 
     # Starts flow for channel token
-    def createChannelToken(self):
+    def createChannelToken(self, name: str):
 
         # Starts flow
         flow = InstalledAppFlow.from_client_config(
@@ -56,12 +56,12 @@ class YouTubeClient():
         creds = flow.run_local_server(port=0)
         model_helper.set_database(
             collection="creds",
-            document="youtube_token",
+            document=name,
             data=json.loads(creds.to_json())
         )
 
     # Function to interface with YouTube API
-    def createService(self):
+    def createService(self, channel_token_name: str):
         try:
 
             # API vars defined
@@ -70,28 +70,20 @@ class YouTubeClient():
             SCOPES = self.scopes
 
             # Gets creds
-            creds = None
+            client_token = self.getChannelToken(name=channel_token_name)
             creds = Credentials.from_authorized_user_info(
-                info=self.getChannelToken(),
+                info=client_token,
                 scopes=SCOPES
             )
-
-            # Checks creds and updates if necessary
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                    model_helper.set_database(
-                        collection="creds",
-                        document="youtube_token",
-                        data=creds.to_json()
-                    )
-                else:
-                    self.createChannelToken()
+            model_helper.set_database(
+                collection="creds",
+                document=channel_token_name,
+                data=json.loads(creds.to_json())
+            )
 
             # Builds service
-            service = build(API_SERVICE_NAME, API_VERSION, credentials=creds, static_discovery=False)
+            self.service = build(API_SERVICE_NAME, API_VERSION, credentials=creds, static_discovery=False)
             print(API_SERVICE_NAME, API_VERSION, 'service created successfully')
-            self.service = service
             return True
         
         except Exception as e:
@@ -211,15 +203,31 @@ class YouTubeClient():
             maxResults=50  
         ).execute()
         return results["pageInfo"]["totalResults"]
+
+def upload_video(
+    filename: str,
+    type: str, 
+    title: str, 
+    description: str, 
+    tags: list, 
+    category_id: int, 
+    privacy_status: str
+):
     
-# youtube_api = YouTubeClient()
-# youtube_api.createChannelToken()
-# youtube_api.createService()
-# youtube_api.uploadVideo(
-#     video_file="output.mp4",
-#     title="Test",
-#     description="Hello World",
-#     tags=["funny", "cool"],
-#     category_id=23,
-#     privacy_status="private"
-# )
+    # Generate video
+    youtube_api = YouTubeClient()
+    youtube_api.createService(channel_token_name=type)
+    success, id = youtube_api.uploadVideo(
+        video_file=filename,
+        title=title,
+        description=description,
+        tags=tags,
+        category_id=category_id,
+        privacy_status=privacy_status
+    )
+
+    if success:
+        return True, id
+    else:
+        return False, "",
+

@@ -13,9 +13,18 @@ from google.auth.transport.requests import AuthorizedSession
 import os
 from google.cloud import tasks_v2
 from requests_oauthlib import OAuth1Session
+import requests
+from google.cloud import texttospeech_v1beta1 as tts_beta
+from google.oauth2 import service_account
+import os
+from moviepy import AudioFileClip, ImageClip
+import io
+import uuid
+import random
+import tempfile
 
 # LOAD ENV VARS
-DEV = True
+DEV = False
 if DEV:
     cred = credentials.Certificate("model/firebase.json")
     initialize_app(cred)
@@ -180,3 +189,142 @@ def create_tweet(payload: dict):
 
     # Returns tweet id
     return True, response.json()["data"]["id"]
+
+# CONVERT TEXT TO SSML
+def convert_text_ssml(words_array: list):
+    words = words_array
+    ssml = "<speak>"
+    for word in words:
+        id = "".join(char for char in f"{word}{uuid.uuid4()}" if char.isalnum())
+        ssml += f" {word} <mark name='{id}'/>"
+    ssml += "</speak>"
+    return ssml
+
+# RETRIEVES COMEDY JOKES VIA API
+def get_joke() -> tuple[bool, str, str]:
+
+    try:
+
+        # Gets joke from humour api
+        res = requests.get(
+            url="https://api.humorapi.com/jokes/random",
+            params={
+                "exclude-tags": "racist,nsfw",
+                "max-length": 500,
+                "min-rating": 5,
+                "api-key": os.getenv("COMEDY_API_KEY")
+            }
+        )
+        res_obj = res.json()
+        id, joke = res_obj["id"], res_obj["joke"]
+        return True, id, joke
+    
+    except Exception as error:
+
+        # Gets joke from alternative api
+        res = requests.get(
+            url="https://v2.jokeapi.dev/joke/Any?type=single"
+        )
+        res_obj = res.json()
+        if res_obj["error"] == False:
+            if res_obj["type"] == "single":
+                return True, res_obj["id"], res_obj["joke"]
+            elif res_obj["type"] == "twopart":
+                return True, res_obj["id"], f"{res_obj['setup']} {res_obj['delivery']}"
+        else:
+            return False, "", ""
+        
+# GENERATE TTS USING GOOGLE TEXT-TO-SPEECH BETA API
+def gen_tts_beta(words_array: list):
+
+    # Credentials
+    credentials = service_account.Credentials.from_service_account_info({
+        "type": "service_account",
+        "project_id": "nous-486de",
+        "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GOOGLE_PRIVATE_KEY"),
+        "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40nous-486de.iam.gserviceaccount.com",
+        "universe_domain": "googleapis.com"
+    })
+
+    # Instantiates a client
+    client = tts_beta.TextToSpeechClient(credentials=credentials)
+
+    # Convert text input to ssml to be synthesized
+    ssml = convert_text_ssml(words_array=words_array)
+    synthesis_input = tts_beta.SynthesisInput(ssml=ssml)
+
+    # Build the voice request, select the language code, and the ssml voice gender
+    voice = tts_beta.VoiceSelectionParams(
+        language_code="en-AU",
+        name="en-AU-Wavenet-B",
+        ssml_gender=tts_beta.SsmlVoiceGender.MALE,
+    )
+
+    # Select the type of audio file you want returned
+    audio_config = tts_beta.AudioConfig(
+        audio_encoding=tts_beta.AudioEncoding.MP3
+    )
+
+    # Perform the text-to-speech request on the text input with the selected voice parameters and audio file type
+    response = client.synthesize_speech(
+        request=tts_beta.SynthesizeSpeechRequest(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config,
+            enable_time_pointing=[
+                tts_beta.SynthesizeSpeechRequest.TimepointType.SSML_MARK
+            ]
+        )
+    )
+
+    # Creates timestamps
+    marks = [t.time_seconds for t in response.timepoints]
+    marks.insert(0, 0)
+    marks = [y-x for x, y in zip(marks[:-1], marks[1:])]
+
+    temp = tempfile.NamedTemporaryFile(suffix=".mp3")
+    with open(temp.name, "wb") as out:
+        out.write(response.audio_content)
+    return AudioFileClip(temp.name), marks
+
+# GETS PHOTOS USING PEXELS API
+def get_photo(query: str):
+    try:
+
+        # Perform api request
+        response = requests.get(
+            url="https://api.pexels.com/v1/search",
+            params={
+                "query": query,
+                "orientation": "portrait"
+            },
+            headers={
+                "Authorization": "XLvFuG4LIUV3ABjxUPoGUvMuLaY6ZnFQ2GlcpYu8KHQIwj1Z5nYoYTov"
+            }
+        )
+        response_obj = response.json()
+        if int(response_obj["total_results"]) > 0:
+
+            # Read image response
+            results_photos = response_obj["photos"]
+            result_cursor = random.randint(0, len(results_photos)-1)
+            result_obj = results_photos[result_cursor]
+
+            # Convert image url to ImageClip for moviepy
+            image_url = result_obj["src"]["portrait"]
+            response = requests.get(image_url, stream=True)
+            image_data = io.BytesIO(response.content)
+        
+            return True, (result_obj["url"], ImageClip(image_data))
+        else:
+            log(f"ERROR WITH PHOTO RETRIEVAL: {response_obj}")
+            return False, response_obj
+    except Exception as error:
+        log(f"ERROR WITH PHOTO REQUEST: {error}")
+        return False, error
